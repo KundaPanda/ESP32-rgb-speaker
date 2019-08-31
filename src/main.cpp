@@ -332,7 +332,7 @@ void pulseToBase(void *params) {
 		if (i < lastBaseIndex) {
 			if (bandValues[i] > baseThreshold) {
 				if (!(baseCycles > baseCyclesThreshold)) {
-					baseCycles++;
+					baseCycles = STATE_SWITCH_CYCLES;
 				}
 			}
 		} else if (i < lastMidIndex) {
