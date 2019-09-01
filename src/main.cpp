@@ -1,6 +1,8 @@
 #include "soc/timer_group_reg.h"
 #include "soc/timer_group_struct.h"
 #include <Arduino.h>
+#include <FastLED.h>
+#include <LEDMatrix.h>
 #include <NeoPixelBus.h>
 #include <WiFi.h>
 #include <analogWrite.h>
@@ -13,6 +15,65 @@
 #define NSAMPLES 512
 #define SLEEP_TIME_MS 1000
 #define STATE_SWITCH_CYCLES 7
+
+#define DATA_PIN 25
+#define COLOR_ORDER RGB
+#define CHIPSET WS2812B
+#define MATRIX_WIDTH 16
+#define MATRIX_HEIGHT 16
+#define MATRIX_TYPE VERTICAL_ZIGZAG_MATRIX
+const int MATRIX_SIZE = (MATRIX_WIDTH * MATRIX_HEIGHT);
+const int NUMPIXELS = MATRIX_SIZE;
+cLEDMatrix<MATRIX_WIDTH, MATRIX_HEIGHT, MATRIX_TYPE> leds;
+DEFINE_GRADIENT_PALETTE(rainbow_gp){
+	0, 126, 1, 142,
+	25, 171, 1, 26,
+	48, 224, 9, 1,
+	71, 237, 138, 1,
+	94, 52, 173, 1,
+	117, 1, 201, 1,
+	140, 1, 211, 54,
+	163, 1, 124, 168,
+	186, 1, 8, 149,
+	209, 12, 1, 151,
+	232, 12, 1, 151,
+	255, 171, 1, 190
+};
+
+DEFINE_GRADIENT_PALETTE(spellbound_gp){
+	0, 232, 235, 40,
+	12, 157, 248, 46,
+	25, 100, 246, 51,
+	45, 53, 250, 33,
+	63, 18, 237, 53,
+	81, 11, 211, 162,
+	94, 18, 147, 214,
+	101, 43, 124, 237,
+	112, 49, 75, 247,
+	127, 49, 75, 247,
+	140, 92, 107, 247,
+	150, 120, 127, 250,
+	163, 130, 138, 252,
+	173, 144, 131, 252,
+	186, 148, 112, 252,
+	196, 144, 37, 176,
+	211, 113, 18, 87,
+	221, 163, 33, 53,
+	234, 255, 101, 78,
+	247, 229, 235, 46,
+	255, 229, 235, 46
+};
+
+CRGBPalette256 currentPalette = rainbow_gp;
+int paletteProgress = 0;
+int paletteStepSpectrum = 4;
+int paletteStep = 1;
+const int PALETTE_STEP_COUNTDOWN = 4;
+int paletteStepCountdown = PALETTE_STEP_COUNTDOWN;
+const CRGB off(0, 0, 0);
+const CRGB white(255, 255, 255);
+const CRGB red(255, 0, 0);
+
 const float MATRIX_FPS = 60.0;
 const float CALIBRATE_FREQ = 12000.0;
 const float IDLE_MIC_VOLTAGE = 1239.0;
@@ -38,25 +99,25 @@ const double FREQ_THRESHOLD = 40.0;
 const double SPECTRUM_THRESHOLD = 20000;
 
 // make sure to set these panel values to the sizes of yours
-const uint8_t PanelWidth = 16; // 8 pixel x 8 pixel matrix of leds
-const uint8_t PanelHeight = 16;
-const uint16_t PixelCount = PanelWidth * PanelHeight;
-const uint8_t PixelPin = 25;
-NeoTiles<MyPanelLayout, MyTilesLayout> tiles(
-    PanelWidth,
-    PanelHeight,
-    1,
-    1);
-NeoPixelBus<NeoGrbFeature, Neo800KbpsMethod> strip(PixelCount, PixelPin);
-RgbColor red(15, 0, 0);
-RgbColor green(0, 15, 0);
-RgbColor blue(0, 0, 15);
-RgbColor white(15, 15, 15);
-RgbColor off(0, 0, 0);
-const HsbColor rainbowStart(0.0, 1.0, 1.0);
-const HsbColor rainbowEnd(1.0, 1.0, 1.0);
-const float rainbowStep = 0.001;
-float rainbowProgress = 0.0;
+// const uint8_t PanelWidth = 16; // 8 pixel x 8 pixel matrix of leds
+// const uint8_t PanelHeight = 16;
+// const uint16_t PixelCount = PanelWidth * PanelHeight;
+// const uint8_t PixelPin = 25;
+// NeoTiles<MyPanelLayout, MyTilesLayout> tiles(
+//     PanelWidth,
+//     PanelHeight,
+//     1,
+//     1);
+// NeoPixelBus<NeoGrbFeature, Neo800KbpsMethod> strip(PixelCount, PixelPin);
+// RgbColor red(15, 0, 0);
+// RgbColor green(0, 15, 0);
+// RgbColor blue(0, 0, 15);
+// RgbColor white(255, 255, 255);
+// HsbColor whiteHsb(0.0, 0.0, 1.0);
+// RgbColor off(0, 0, 0);
+// HsbColor rainbowCurrent(0.0, 1.0, 1.0);
+// const float rainbowStep = 0.001;
+// const float rainbowStepSpectrum = 0.01;
 
 arduinoFFT FFT;
 float peakBand;
@@ -73,7 +134,6 @@ typedef struct {
 	short state;
 	short stateSwitchCycles;
 	animationType type;
-	RgbColor color;
 	bool available;
 } animation;
 void (*chosenAnimation)(void *);
@@ -158,12 +218,6 @@ void getSamples(int amount) {
 	}
 }
 
-void clearAll(void) {
-	for (int pixel = 0; pixel < PixelCount; pixel++) {
-		strip.SetPixelColor(pixel, off);
-	}
-}
-
 double getSampleSpeed() {
 	int samples = 10000;
 	double start = micros();
@@ -183,55 +237,52 @@ void showSpectrum(void *params) {
 	if (DEBUG) {
 		Serial.printf("Showing spectrum\n");
 	}
-	float values[NBANDS];
+	// float start = millis();
+	double values[NBANDS];
+	CRGB colors[NBANDS];
+	// HsbColor current = rainbowCurrent;
 	for (int i = 0; i < NBANDS; i++) {
 		values[i] = (maximum * (16 - i) / 15);
-		// Serial.printf("%d: %lf\n", i, values[i]);
+		colors[i] = ColorFromPalette(currentPalette, paletteProgress + i * paletteStepSpectrum);
 	}
-	RgbColor color = red;
-	clearAll();
+	fill_solid(FastLED.leds(), MATRIX_SIZE, off);
+	// strip.ClearTo(off);
 	for (int x = 0; x < NBANDS; x++) {
 		for (int y = 15; y >= 0; y--) {
 			if (bandValues[x] >= values[y]) {
-				if (y > 10) {
-					color = red;
-				} else if (y > 5) {
-					color = green;
-				} else {
-					color = blue;
-				}
-				strip.SetPixelColor(tiles.Map(x, y), color);
+				// strip.SetPixelColor(tiles.Map(x, y), colors[15 - y]);
+				leds.DrawPixel(x, y, colors[15 - y]);
 			}
 		}
+		// strip.SetPixelColor(15 * 15, blue);
 	}
-	// strip.SetPixelColor(15 * 15, blue);
-	strip.Show();
+	FastLED.show();
+	// strip.Show();
 }
 
 void showAnimations(void) {
-	HsbColor inverseColor = HsbColor::LinearBlend<NeoHueBlendClockwiseDirection>(rainbowStart, rainbowEnd, 1.0 - rainbowProgress);
-	HsbColor color(0.0, 0.0, 0.0);
+	CRGB inverse = ColorFromPalette(currentPalette, 255 - paletteProgress + 30);
+	// HsbColor inverseColor(fmodf(rainbowCurrent.H + 0.3, 1.0), 0.0, 0.0);
+	// HsbColor color(0.0, 0.0, 0.0);
 	if (baseCycles > 0) {
 		baseCycles--;
-		color = HsbColor::LinearBlend<NeoHueBlendClockwiseDirection>(rainbowStart, rainbowEnd, rainbowProgress);
+		fill_solid(FastLED.leds(), MATRIX_SIZE, ColorFromPalette(currentPalette, paletteProgress));
+	} else {
+		fill_solid(FastLED.leds(), MATRIX_SIZE, off);
 	}
-	for (int x = 0; x < PanelWidth; x++) {
-		for (int y = 0; y < PanelHeight; y++) {
-			strip.SetPixelColor(tiles.Map(x, y), color);
-		}
-	}
-	for (int x = 0; x < PanelWidth; x++) {
-		for (int y = 0; y < PanelHeight; y++) {
+	// strip.ClearTo(color);
+	for (int x = 0; x < MATRIX_WIDTH; x++) {
+		for (int y = 0; y < MATRIX_HEIGHT; y++) {
 			animation *anim = &animationsArray[y][x];
 			if (anim->available)
 				continue;
-
 			switch (anim->type) {
 			case STAR: {
 				switch (anim->state) {
 				case 0:
 				case 2: {
-					strip.SetPixelColor(tiles.Map(x, y), anim->color);
+					// strip.SetPixelColor(tiles.Map(x, y), white);
+					leds.DrawPixel(x, y, white);
 					anim->stateSwitchCycles--;
 					if (anim->stateSwitchCycles == 0) {
 						anim->state++;
@@ -240,10 +291,14 @@ void showAnimations(void) {
 					break;
 				}
 				case 1: {
-					strip.SetPixelColor(tiles.Map(x + 1, y), anim->color);
-					strip.SetPixelColor(tiles.Map(x - 1, y), anim->color);
-					strip.SetPixelColor(tiles.Map(x, y + 1), anim->color);
-					strip.SetPixelColor(tiles.Map(x, y - 1), anim->color);
+					leds.DrawPixel(x + 1, y, white);
+					leds.DrawPixel(x - 1, y, white);
+					leds.DrawPixel(x, y + 1, white);
+					leds.DrawPixel(x, y - 1, white);
+					// strip.SetPixelColor(tiles.Map(x + 1, y), white);
+					// strip.SetPixelColor(tiles.Map(x - 1, y), white);
+					// strip.SetPixelColor(tiles.Map(x, y + 1), white);
+					// strip.SetPixelColor(tiles.Map(x, y - 1), white);
 					anim->stateSwitchCycles--;
 					if (anim->stateSwitchCycles == 0) {
 						anim->state++;
@@ -262,7 +317,8 @@ void showAnimations(void) {
 			case STRIPE: {
 				switch (anim->state) {
 				case 0: {
-					strip.SetPixelColor(tiles.Map(x, y), inverseColor);
+					leds.DrawPixel(x, y, inverse);
+					// strip.SetPixelColor(tiles.Map(x, y), inverseColor);
 					anim->stateSwitchCycles--;
 					if (anim->stateSwitchCycles == 0) {
 						anim->state++;
@@ -271,9 +327,12 @@ void showAnimations(void) {
 					break;
 				}
 				case 1: {
-					strip.SetPixelColor(tiles.Map(x, y), inverseColor);
-					strip.SetPixelColor(tiles.Map(x, y + 1), inverseColor);
-					strip.SetPixelColor(tiles.Map(x, y - 1), inverseColor);
+					leds.DrawPixel(x, y, inverse);
+					leds.DrawPixel(x, y + 1, inverse);
+					leds.DrawPixel(x, y - 1, inverse);
+					// strip.SetPixelColor(tiles.Map(x, y), inverseColor);
+					// strip.SetPixelColor(tiles.Map(x, y + 1), inverseColor);
+					// strip.SetPixelColor(tiles.Map(x, y - 1), inverseColor);
 					anim->stateSwitchCycles--;
 					if (anim->stateSwitchCycles == 0) {
 						anim->state++;
@@ -282,8 +341,10 @@ void showAnimations(void) {
 					break;
 				}
 				case 2: {
-					strip.SetPixelColor(tiles.Map(x, y + 1), inverseColor);
-					strip.SetPixelColor(tiles.Map(x, y - 1), inverseColor);
+					leds.DrawPixel(x, y + 1, inverse);
+					leds.DrawPixel(x, y - 1, inverse);
+					// strip.SetPixelColor(tiles.Map(x, y + 1), inverseColor);
+					// strip.SetPixelColor(tiles.Map(x, y - 1), inverseColor);
 					anim->stateSwitchCycles--;
 					if (anim->stateSwitchCycles == 0) {
 						anim->state++;
@@ -308,19 +369,14 @@ void addAnimation(animationType type) {
 	if (animations >= maxAnimations) {
 		return;
 	}
-	int pixel = rand() % (PixelCount);
-	while (animationsArray[pixel % PanelWidth][pixel / PanelWidth].available == false) {
+	int pixel = rand() % (MATRIX_SIZE);
+	while (animationsArray[pixel % MATRIX_WIDTH][pixel / MATRIX_WIDTH].available == false) {
 		//TODO better algorithm for placement
-		pixel = (pixel + 1) % (PixelCount);
+		pixel = (pixel + 1) % (MATRIX_SIZE);
 	}
-	int x = pixel % PanelWidth;
-	int y = pixel / PanelWidth;
+	int x = pixel % MATRIX_WIDTH;
+	int y = pixel / MATRIX_WIDTH;
 	animationsArray[y][x].available = false;
-	if (type == STRIPE) {
-		animationsArray[y][x].color = green;
-	} else {
-		animationsArray[y][x].color = white;
-	}
 	animationsArray[y][x].state = 0;
 	animationsArray[y][x].type = type;
 	animationsArray[y][x].stateSwitchCycles = STATE_SWITCH_CYCLES;
@@ -332,7 +388,7 @@ void pulseToBase(void *params) {
 		if (i < lastBaseIndex) {
 			if (bandValues[i] > baseThreshold) {
 				if (!(baseCycles > baseCyclesThreshold)) {
-					baseCycles = STATE_SWITCH_CYCLES;
+					baseCycles = 15;
 				}
 			}
 		} else if (i < lastMidIndex) {
@@ -348,7 +404,8 @@ void pulseToBase(void *params) {
 		}
 	}
 	showAnimations();
-	strip.Show();
+	FastLED.show();
+	// strip.Show();
 	addAnimations = false;
 }
 
@@ -377,11 +434,16 @@ void callMatrixFunction(void *params) {
 				//TODO: temperature measurement + fan curve + fan output (waiting for parts to arrive) -> remove DEBUG
 			}
 		}
+		paletteStepCountdown--;
+		if (paletteStepCountdown == 0) {
+			paletteProgress = (paletteProgress + paletteStep) % 256;
+			paletteStepCountdown = PALETTE_STEP_COUNTDOWN;
+		}
 		//TODO: debug pulsetobase, remove!!!!
 		// chosenAnimation = pulseToBase;
 		chosenAnimation(params);
 		functionSwitchTime = rand() % (functionSwitchTimeMax - functionSwitchTimeMin) + functionSwitchTimeMin;
-		rainbowProgress = fmodf((rainbowProgress + rainbowStep), 1.0);
+		// rainbowCurrent.H = fmodf((rainbowCurrent.H + rainbowStep), 1.0);
 		vTaskDelay(1 / portTICK_PERIOD_MS);
 		while (abs(millis() - matrixStart) < 1000 / MATRIX_FPS)
 			;
@@ -393,8 +455,8 @@ void setup() {
 	Serial.begin(115200);
 	WiFi.mode(WIFI_OFF);
 	btStop();
-	for (int i = 0; i < PanelHeight; i++) {
-		for (int j = 0; j < PanelWidth; j++) {
+	for (int i = 0; i < MATRIX_HEIGHT; i++) {
+		for (int j = 0; j < MATRIX_WIDTH; j++) {
 			animationsArray[i][j].available = true;
 		}
 	}
@@ -404,19 +466,29 @@ void setup() {
 	analogReadResolution(12);
 	analogWriteResolution(fanPin, 10);
 	analogWriteFrequency(fanPin, 40000);
-	calibrate_silence();
+	// calibrate_silence();
+	FastLED.addLeds<CHIPSET, DATA_PIN, COLOR_ORDER>(leds[0], leds.Size()).setCorrection(TypicalSMD5050);
+	FastLED.setBrightness(127);
+	FastLED.clear(true);
+	for (int i = 1; i < sqrt(pow(MATRIX_WIDTH, 2) + pow(MATRIX_HEIGHT, 2)); i++) {
+		leds.DrawFilledCircle(0, 0, i, red);
+		FastLED.show();
+		delay(60);
+	}
+	fill_solid(FastLED.leds(), MATRIX_SIZE, off);
+	FastLED.show();
 	// put your setup code here, to run once:
 	// uint16_t result = calibrate_silence();
 	// getSampleSpeed();
-	strip.Begin();
-	for (int i = 0; i < PanelWidth; i++) {
-		for (int j = 0; j < PanelHeight; j++) {
-			strip.SetPixelColor(tiles.Map(i, j), red);
-			strip.Show();
-		}
-	}
-	strip.ClearTo(RgbColor(0, 0, 0));
-	strip.Show();
+	// strip.Begin();
+	// for (int i = 0; i < MATRIX_WIDTH; i++) {
+	// 	for (int j = 0; j < MATRIX_HEIGHT; j++) {
+	// 		strip.SetPixelColor(tiles.Map(i, j), red);
+	// 	}
+	// 	strip.Show();
+	// }
+	// strip.ClearTo(RgbColor(0, 0, 0));
+	// strip.Show();
 	std::random_shuffle(animationTypes, std::end(animationTypes));
 	chosenAnimation = pulseToBase;
 	xTaskCreatePinnedToCore(
