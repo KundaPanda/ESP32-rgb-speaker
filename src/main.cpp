@@ -9,6 +9,8 @@
 #include <arduinoFFT.h>
 #include <esp32-hal-cpu.h>
 
+const bool DEBUG = false;
+
 #define tempPin 27
 #define fanPin 12
 #define micPin 32
@@ -22,8 +24,8 @@
 #define MATRIX_WIDTH 16
 #define MATRIX_HEIGHT 16
 #define MATRIX_TYPE VERTICAL_ZIGZAG_MATRIX
-const int MATRIX_SIZE = (MATRIX_WIDTH * MATRIX_HEIGHT);
-const int NUMPIXELS = MATRIX_SIZE;
+const int MATRIX_SIZE = MATRIX_WIDTH * MATRIX_HEIGHT;
+const float MATRIX_FPS = 60.0;
 cLEDMatrix<MATRIX_WIDTH, MATRIX_HEIGHT, MATRIX_TYPE> leds;
 DEFINE_GRADIENT_PALETTE(rainbow_gp){
 	0, 126, 1, 142,
@@ -74,50 +76,38 @@ const CRGB off(0, 0, 0);
 const CRGB white(255, 255, 255);
 const CRGB red(255, 0, 0);
 
-const float MATRIX_FPS = 60.0;
-const float CALIBRATE_FREQ = 12000.0;
-const float IDLE_MIC_VOLTAGE = 1239.0;
+// const float CALIBRATE_FREQ = 12000.0;
+// const float IDLE_MIC_VOLTAGE = 1239.0;
 const int IDLE_READING = 1267;
-const int LOW_VOLTAGE_ACTUAL = 8;
-const int LOW_VOLTAGE_READING = 220;
+// const int LOW_VOLTAGE_ACTUAL = 8;
+// const int LOW_VOLTAGE_READING = 220;
 const float HIGH_VOLTAGE = 3227.0;
 const double SAMPLE_RATE = 38000.0;
 const double SAMPLE_TIME = (1.0 * 1000 * 1000 / SAMPLE_RATE);
-const bool DEBUG = false;
 
+/**
+ * bass - 20-250
+ * mids - 250-2500
+ * upper mids - 2500-5000
+ * highs - 5000-20000
+ **/
+const int NBANDS = 16;
+const int BANDS[NBANDS] = { 200, 450, 700, 900, 1200, 1500, 1800, 2300, 2800, 3500, 4700, 5500, 6700, 8000, 12000, 20000 };
+double bandValues[NBANDS];
+const int lastBaseIndex = 1;
+const int lastMidIndex = 7;
+const int lastHighIndex = 15;
 const float BASE_THRESHOLD = 5500.0;
-const float MID_THRESHOLD = 15000.0;
+const float MID_THRESHOLD = 13000.0;
 const float HIGH_THRESHOLD = 10000.0;
 float baseThreshold = BASE_THRESHOLD;
 float midThreshold = MID_THRESHOLD;
 float highThreshold = HIGH_THRESHOLD;
-TaskHandle_t MatrixTask;
-typedef ColumnMajorAlternatingLayout MyPanelLayout;
-typedef ColumnMajorLayout MyTilesLayout;
 const double THRESHOLD = 500.0;
 const double FREQ_THRESHOLD = 40.0;
 const double SPECTRUM_THRESHOLD = 20000;
 
-// make sure to set these panel values to the sizes of yours
-// const uint8_t PanelWidth = 16; // 8 pixel x 8 pixel matrix of leds
-// const uint8_t PanelHeight = 16;
-// const uint16_t PixelCount = PanelWidth * PanelHeight;
-// const uint8_t PixelPin = 25;
-// NeoTiles<MyPanelLayout, MyTilesLayout> tiles(
-//     PanelWidth,
-//     PanelHeight,
-//     1,
-//     1);
-// NeoPixelBus<NeoGrbFeature, Neo800KbpsMethod> strip(PixelCount, PixelPin);
-// RgbColor red(15, 0, 0);
-// RgbColor green(0, 15, 0);
-// RgbColor blue(0, 0, 15);
-// RgbColor white(255, 255, 255);
-// HsbColor whiteHsb(0.0, 0.0, 1.0);
-// RgbColor off(0, 0, 0);
-// HsbColor rainbowCurrent(0.0, 1.0, 1.0);
-// const float rainbowStep = 0.001;
-// const float rainbowStepSpectrum = 0.01;
+TaskHandle_t MatrixTask;
 
 arduinoFFT FFT;
 float peakBand;
@@ -130,37 +120,33 @@ typedef enum {
 	STAR,
 	STRIPE
 } animationType;
+
 typedef struct {
 	short state;
 	short stateSwitchCycles;
 	animationType type;
 	bool available;
 } animation;
+
+int animations = 0;
+const int maxAnimations = 40;
 void (*chosenAnimation)(void *);
 bool addAnimations = false;
 animation animationsArray[16][16];
 
-/**
- * bass - 20-250
- * mids - 250-2500
- * upper mids - 2500-5000
- * highs - 5000-20000
- **/
-const int NBANDS = 16;
-const int BANDS[NBANDS] = { 200, 450, 700, 900, 1200, 1500, 1800, 2300, 2800, 3500, 4700, 5500, 6700, 8000, 12000, 20000 };
-const int lastBaseIndex = 1;
-const int lastMidIndex = 7;
-const int lastHighIndex = 15;
 const int functionSwitchTimeMax = 60000;
 const int functionSwitchTimeMin = 15000;
 int functionSwitchTime = rand() % (functionSwitchTimeMax - functionSwitchTimeMin) + functionSwitchTimeMin;
 int lastSwitchTime = 0;
-double bandValues[NBANDS];
-unsigned long last = 0;
-int animations = 0;
-const int maxAnimations = 40;
 int baseCycles = 0;
 int baseCyclesThreshold = 60;
+
+/**TODO: remove commented code
+* add comments and documentation
+* add more animations
+* fan control
+* clean up variables
+*/
 
 void getPeak(void) {
 	peakValue = 0;
@@ -205,6 +191,7 @@ double calibrate_silence(void) {
 }
 
 void getSamples(int amount) {
+	unsigned long last = 0;
 	float freeTime = 0;
 	for (int i = 0; i < amount; i++) {
 		last = micros();
