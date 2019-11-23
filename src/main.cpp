@@ -1,19 +1,23 @@
 #include "soc/timer_group_reg.h"
 #include "soc/timer_group_struct.h"
-#include <Arduino.h>
-#include <FastLED.h>
-#include <LEDMatrix.h>
-#include <NeoPixelBus.h>
 #include <WiFi.h>
-#include <analogWrite.h>
+#include <Arduino.h>
+#include <NeoPixelBus.h>
+#include <DallasTemperature.h>
+#include <FastLED.h>
+#include <FastLED_GFX.h>
+#include <LEDMatrix.h>
 #include <arduinoFFT.h>
 #include <esp32-hal-cpu.h>
+#include <string>
 
 const bool DEBUG = false;
 
 #define tempPin 27
 #define fanPin 12
+#define fanChannel 0
 #define micPin 32
+#define switchPin 22
 #define NSAMPLES 512
 #define SLEEP_TIME_MS 1000
 #define STATE_SWITCH_CYCLES 7
@@ -92,23 +96,27 @@ const double SAMPLE_TIME = (1.0 * 1000 * 1000 / SAMPLE_RATE);
  * highs - 5000-20000
  **/
 const int NBANDS = 16;
-const int BANDS[NBANDS] = { 200, 450, 700, 900, 1200, 1500, 1800, 2300, 2800, 3500, 4700, 5500, 6700, 8000, 12000, 20000 };
+const int BANDS[NBANDS] = { 150, 280, 520, 740, 960, 1240, 1450, 1750, 2200, 2600, 3100, 3700, 5000, 7500, 10000, 20000 };
 double bandValues[NBANDS];
 const int lastBaseIndex = 1;
 const int lastMidIndex = 7;
 const int lastHighIndex = 15;
-const float BASE_THRESHOLD = 5500.0;
-const float MID_THRESHOLD = 13000.0;
-const float HIGH_THRESHOLD = 10000.0;
+const float BASE_THRESHOLD = 8500.0;
+const float MID_THRESHOLD = 7000.0;
+const float HIGH_THRESHOLD = 6000.0;
+const float upFreqModifier = 0.952;
+const float downFreqModifier = 1.048;
 float baseThreshold = BASE_THRESHOLD;
 float midThreshold = MID_THRESHOLD;
 float highThreshold = HIGH_THRESHOLD;
-const double THRESHOLD = 500.0;
+const double READING_THRESHOLD = 1500.0;
 const double FREQ_THRESHOLD = 40.0;
-const double SPECTRUM_THRESHOLD = 20000;
+const double SPECTRUM_THRESHOLD = 8000;
+int cyclesWithoutBase = 0;
+const int CYCLES_WITHOUT_BASE_THRESHOLD = 100;
 
 TaskHandle_t MatrixTask;
-
+GFXcanvas canvas(MATRIX_WIDTH, MATRIX_HEIGHT);
 arduinoFFT FFT;
 float peakBand;
 float peakValue;
@@ -129,17 +137,25 @@ typedef struct {
 } animation;
 
 int animations = 0;
-const int maxAnimations = 40;
+const int maxAnimations = 25;
+const int minAnimations = 4;
 void (*chosenAnimation)(void *);
 bool addAnimations = false;
 animation animationsArray[16][16];
 
-const int functionSwitchTimeMax = 60000;
-const int functionSwitchTimeMin = 15000;
+const int functionSwitchTimeMax = 100000;
+const int functionSwitchTimeMin = 30000;
 int functionSwitchTime = rand() % (functionSwitchTimeMax - functionSwitchTimeMin) + functionSwitchTimeMin;
 int lastSwitchTime = 0;
+int btnPressed = 0;
+int btnPressSleep = 0;
 int baseCycles = 0;
-int baseCyclesThreshold = 60;
+int baseCyclesThreshold = 38;
+
+OneWire oneWire(tempPin);
+DallasTemperature tempSensor(&oneWire);
+const int tempReadIntervalMs = 20000;
+int lastTempReadTime = 0;
 
 /**TODO: remove commented code
 * add comments and documentation
@@ -164,6 +180,31 @@ void doFFT(void) {
 	FFT.Windowing(FFT_WIN_TYP_HAMMING, FFT_FORWARD);
 	FFT.Compute(FFT_FORWARD);
 	FFT.ComplexToMagnitude();
+	int i = 2;
+	double freq = (i * SAMPLE_RATE) / NSAMPLES;
+	for (int bIndex = 0; bIndex < NBANDS; bIndex++) {
+		const int band = BANDS[bIndex];
+		double result = 0;
+		int nbands = 0;
+		while (freq < band) {
+			freq = (i * SAMPLE_RATE) / NSAMPLES;
+			result += real[i];
+			nbands++;
+			i++;
+		}
+		result /= nbands;
+		// 220 - noise
+		if (READING_THRESHOLD > result)
+			result = 0.0;
+		// Reduce vaule of OP base
+		if (bIndex == 0)
+			result *= 0.3;
+
+		bandValues[bIndex] = result;
+		if (DEBUG) {
+			Serial.printf("%d Hz: %lf\n", band, result);
+		}
+	}
 	getPeak();
 	maximum = (peakValue > SPECTRUM_THRESHOLD) ? peakValue : SPECTRUM_THRESHOLD;
 }
@@ -229,7 +270,7 @@ void showSpectrum(void *params) {
 	CRGB colors[NBANDS];
 	// HsbColor current = rainbowCurrent;
 	for (int i = 0; i < NBANDS; i++) {
-		values[i] = (maximum * (16 - i) / 15);
+		values[i] = (maximum * (17 - i) / 15);
 		colors[i] = ColorFromPalette(currentPalette, paletteProgress + i * paletteStepSpectrum);
 	}
 	fill_solid(FastLED.leds(), MATRIX_SIZE, off);
@@ -252,10 +293,16 @@ void showAnimations(void) {
 	// HsbColor inverseColor(fmodf(rainbowCurrent.H + 0.3, 1.0), 0.0, 0.0);
 	// HsbColor color(0.0, 0.0, 0.0);
 	if (baseCycles > 0) {
-		baseCycles--;
+		Serial.print("Base cycles: ");
+		Serial.print(baseCycles);
+		Serial.print(", baseThreshold:");
+		Serial.println(baseThreshold);
 		fill_solid(FastLED.leds(), MATRIX_SIZE, ColorFromPalette(currentPalette, paletteProgress));
+		baseCycles--;
+		cyclesWithoutBase = 0;
 	} else {
 		fill_solid(FastLED.leds(), MATRIX_SIZE, off);
+		cyclesWithoutBase++;
 	}
 	// strip.ClearTo(color);
 	for (int x = 0; x < MATRIX_WIDTH; x++) {
@@ -353,31 +400,27 @@ void showAnimations(void) {
 }
 
 void addAnimation(animationType type) {
-	if (animations >= maxAnimations) {
-		return;
+	if (animations < maxAnimations) {
+		int pixel = rand() % (MATRIX_SIZE);
+		while (animationsArray[pixel % MATRIX_WIDTH][pixel / MATRIX_WIDTH].available == false) {
+			//TODO better algorithm for placement
+			pixel = (pixel + 1) % (MATRIX_SIZE);
+		}
+		int x = pixel % MATRIX_WIDTH;
+		int y = pixel / MATRIX_WIDTH;
+		animationsArray[y][x].available = false;
+		animationsArray[y][x].state = 0;
+		animationsArray[y][x].type = type;
+		animationsArray[y][x].stateSwitchCycles = STATE_SWITCH_CYCLES;
+		animations++;
 	}
-	int pixel = rand() % (MATRIX_SIZE);
-	while (animationsArray[pixel % MATRIX_WIDTH][pixel / MATRIX_WIDTH].available == false) {
-		//TODO better algorithm for placement
-		pixel = (pixel + 1) % (MATRIX_SIZE);
-	}
-	int x = pixel % MATRIX_WIDTH;
-	int y = pixel / MATRIX_WIDTH;
-	animationsArray[y][x].available = false;
-	animationsArray[y][x].state = 0;
-	animationsArray[y][x].type = type;
-	animationsArray[y][x].stateSwitchCycles = STATE_SWITCH_CYCLES;
-	animations++;
 }
 
 void pulseToBase(void *params) {
 	for (int i = 0; i < NBANDS; i++) {
 		if (i < lastBaseIndex) {
-			if (bandValues[i] > baseThreshold) {
-				if (!(baseCycles > baseCyclesThreshold)) {
-					baseCycles = 15;
-				}
-			}
+			if (bandValues[i] > baseThreshold && baseCycles <= baseCyclesThreshold)
+				baseCycles += 4;
 		} else if (i < lastMidIndex) {
 			if (bandValues[i] > midThreshold) {
 				if (addAnimations)
@@ -390,6 +433,20 @@ void pulseToBase(void *params) {
 			}
 		}
 	}
+	if (baseCycles >= baseCyclesThreshold * 0.9) {
+		baseCycles -= 20;
+		baseThreshold *= downFreqModifier;
+	} else if (cyclesWithoutBase >= CYCLES_WITHOUT_BASE_THRESHOLD && baseThreshold > BASE_THRESHOLD)
+		baseThreshold *= upFreqModifier;
+	if (animations >= maxAnimations * 0.9) {
+		if (midThreshold > MID_THRESHOLD)
+			midThreshold *= downFreqModifier;
+		if (highThreshold > HIGH_THRESHOLD)
+			highThreshold *= downFreqModifier;
+	} else if (animations <= minAnimations * 0.9) {
+		midThreshold *= upFreqModifier;
+		highThreshold *= upFreqModifier;
+	}
 	showAnimations();
 	FastLED.show();
 	// strip.Show();
@@ -397,6 +454,11 @@ void pulseToBase(void *params) {
 }
 
 void (*animationTypes[])(void *) = { showSpectrum, pulseToBase };
+
+void (*getRandomAnimation())(void *) {
+	std::random_shuffle(animationTypes, std::end(animationTypes));
+	return animationTypes[0];
+}
 
 void callMatrixFunction(void *params) {
 	unsigned long matrixStart;
@@ -408,8 +470,7 @@ void callMatrixFunction(void *params) {
 		matrixStart = millis();
 		if (abs(millis() - lastSwitchTime) > functionSwitchTime) {
 			lastSwitchTime = millis();
-			std::random_shuffle(animationTypes, std::end(animationTypes));
-			chosenAnimation = animationTypes[0];
+			chosenAnimation = getRandomAnimation();
 			animations = 0;
 			if (DEBUG) {
 				voltage = 0;
@@ -432,8 +493,27 @@ void callMatrixFunction(void *params) {
 		functionSwitchTime = rand() % (functionSwitchTimeMax - functionSwitchTimeMin) + functionSwitchTimeMin;
 		// rainbowCurrent.H = fmodf((rainbowCurrent.H + rainbowStep), 1.0);
 		vTaskDelay(1 / portTICK_PERIOD_MS);
-		while (abs(millis() - matrixStart) < 1000 / MATRIX_FPS)
-			;
+		while (abs(millis() - matrixStart) < 1000 / MATRIX_FPS) {
+			// check for switch button in the meantime
+			if (digitalRead(switchPin) == HIGH && (abs(millis() - btnPressed) > btnPressSleep)) {
+				lastSwitchTime = millis();
+				btnPressed = millis();
+				chosenAnimation = getRandomAnimation();
+				while (abs(millis() - matrixStart) < 1000 / MATRIX_FPS)
+					;
+				break;
+			}
+			if (abs(millis() - lastTempReadTime) >= tempReadIntervalMs) {
+				lastTempReadTime = millis();
+				tempSensor.requestTemperatures();
+				float tempC = tempSensor.getTempCByIndex(0);
+				int fanSpeed = tempC < 40 ? 98.30973 + (-0.1301144 - 98.30973) / (1 + pow(pow(tempC / 25.0224, 524.2068), 0.01626859)) : 100;
+				fanSpeed = fanSpeed > 80 ? fanSpeed : 0;
+				ledcWrite(fanChannel, (fanSpeed * 1023) / 100);
+				if (DEBUG)
+					Serial.printf("Temperature: %.1f°C -> fan at %d.\n", tempC, fanSpeed);
+			}
+		}
 	}
 }
 
@@ -449,12 +529,13 @@ void setup() {
 	}
 	pinMode(micPin, INPUT);
 	pinMode(tempPin, INPUT);
-	pinMode(fanPin, OUTPUT);
+	pinMode(switchPin, INPUT);
 	analogReadResolution(12);
-	analogWriteResolution(fanPin, 10);
-	analogWriteFrequency(fanPin, 40000);
+	ledcSetup(fanChannel, 25000, 10);
+	ledcAttachPin(fanPin, fanChannel);
 	// calibrate_silence();
-	FastLED.addLeds<CHIPSET, DATA_PIN, COLOR_ORDER>(leds[0], leds.Size()).setCorrection(TypicalSMD5050);
+	FastLED.addLeds<CHIPSET, DATA_PIN, COLOR_ORDER>(canvas.getBuffer(), canvas.width() * canvas.height()).setCorrection(TypicalSMD5050);
+	leds.SetLEDArray(canvas.getBuffer());
 	FastLED.setBrightness(127);
 	FastLED.clear(true);
 	for (int i = 1; i < sqrt(pow(MATRIX_WIDTH, 2) + pow(MATRIX_HEIGHT, 2)); i++) {
@@ -464,18 +545,7 @@ void setup() {
 	}
 	fill_solid(FastLED.leds(), MATRIX_SIZE, off);
 	FastLED.show();
-	// put your setup code here, to run once:
-	// uint16_t result = calibrate_silence();
-	// getSampleSpeed();
-	// strip.Begin();
-	// for (int i = 0; i < MATRIX_WIDTH; i++) {
-	// 	for (int j = 0; j < MATRIX_HEIGHT; j++) {
-	// 		strip.SetPixelColor(tiles.Map(i, j), red);
-	// 	}
-	// 	strip.Show();
-	// }
-	// strip.ClearTo(RgbColor(0, 0, 0));
-	// strip.Show();
+	tempSensor.begin();
 	std::random_shuffle(animationTypes, std::end(animationTypes));
 	chosenAnimation = pulseToBase;
 	xTaskCreatePinnedToCore(
@@ -486,49 +556,18 @@ void setup() {
 	    10,
 	    &MatrixTask,
 	    0);
-	analogWrite(fanPin, 512);
 }
 
 void loop() {
 	getSamples(NSAMPLES);
 	std::fill(imag, std::end(imag), 0.0);
 	doFFT();
-	int i = 2;
-	double freq = (i * SAMPLE_RATE) / NSAMPLES;
-	// while (freq < FREQ_THRESHOLD) {
-	//     i++;
-	//     freq = (i * SAMPLE_RATE) / NSAMPLES;
-	// }
-	if (DEBUG) {
-		Serial.printf("Starting from: %lf\n", freq);
-	}
-	for (int bIndex = 0; bIndex < NBANDS; bIndex++) {
-		const int band = BANDS[bIndex];
-		double result = 0;
-		int nbands = 0;
-		while (freq < band) {
-			freq = (i * SAMPLE_RATE) / NSAMPLES;
-			result += real[i];
-			nbands++;
-			i++;
-		}
-		result /= nbands;
-		// 220 - noise
-		if (THRESHOLD > result) {
-			result = 0.0;
-		}
-		bandValues[bIndex] = result;
-		if (DEBUG) {
-			Serial.printf("%d Hz: %lf\n", band, result);
-		}
-	}
 	addAnimations = true;
 	// for (int i = 0; i < NSAMPLES / 2; i++) {
 	//     // Serial.printf("Peak: %lf\n", peak);
 	//     Serial.printf("%f Hz: %lf\n", freq, real[i]);
 	//     // Serial.printf("%f Hz: %i\n", FFT_BIN(i, SAMPLE_RATE, NSAMPLES), readings[i]);
 	// }
-	if (DEBUG) {
+	if (DEBUG)
 		Serial.printf("---------\n");
-	}
 }
