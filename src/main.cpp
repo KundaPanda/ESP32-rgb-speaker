@@ -18,9 +18,9 @@ const bool DEBUG = false;
 #define fanChannel 0
 #define micPin 32
 #define switchPin 22
-#define NSAMPLES 512
+#define NSAMPLES 1024
 #define SLEEP_TIME_MS 1000
-#define STATE_SWITCH_CYCLES 7
+#define STATE_SWITCH_CYCLES 9
 
 #define DATA_PIN 25
 #define COLOR_ORDER RGB
@@ -86,7 +86,7 @@ const int IDLE_READING = 1267;
 // const int LOW_VOLTAGE_ACTUAL = 8;
 // const int LOW_VOLTAGE_READING = 220;
 const float HIGH_VOLTAGE = 3227.0;
-const double SAMPLE_RATE = 38000.0;
+const double SAMPLE_RATE = 41000.0;
 const double SAMPLE_TIME = (1.0 * 1000 * 1000 / SAMPLE_RATE);
 
 /**
@@ -96,14 +96,14 @@ const double SAMPLE_TIME = (1.0 * 1000 * 1000 / SAMPLE_RATE);
  * highs - 5000-20000
  **/
 const int NBANDS = 16;
-const int BANDS[NBANDS] = { 150, 280, 520, 740, 960, 1240, 1450, 1750, 2200, 2600, 3100, 3700, 5000, 7500, 10000, 20000 };
+const int BANDS[NBANDS] = { 130, 220, 340, 520, 780, 1000, 1220, 1480, 1960, 2400, 2900, 3600, 4700, 5800, 6500, 20000 };
 double bandValues[NBANDS];
-const int lastBaseIndex = 1;
-const int lastMidIndex = 7;
+const int lastBaseIndex = 2;
+const int lastMidIndex = 10;
 const int lastHighIndex = 15;
-const float BASE_THRESHOLD = 8500.0;
-const float MID_THRESHOLD = 7000.0;
-const float HIGH_THRESHOLD = 6000.0;
+const float BASE_THRESHOLD = 10000.0;
+const float MID_THRESHOLD = 8500.0;
+const float HIGH_THRESHOLD = 7000.0;
 const float upFreqModifier = 0.952;
 const float downFreqModifier = 1.048;
 float baseThreshold = BASE_THRESHOLD;
@@ -111,9 +111,9 @@ float midThreshold = MID_THRESHOLD;
 float highThreshold = HIGH_THRESHOLD;
 const double READING_THRESHOLD = 1500.0;
 const double FREQ_THRESHOLD = 40.0;
-const double SPECTRUM_THRESHOLD = 8000;
+const double SPECTRUM_THRESHOLD = 9500;
 int cyclesWithoutBase = 0;
-const int CYCLES_WITHOUT_BASE_THRESHOLD = 100;
+const int CYCLES_WITHOUT_BASE_THRESHOLD = 180;
 
 TaskHandle_t MatrixTask;
 GFXcanvas canvas(MATRIX_WIDTH, MATRIX_HEIGHT);
@@ -137,17 +137,19 @@ typedef struct {
 } animation;
 
 int animations = 0;
-const int maxAnimations = 25;
-const int minAnimations = 4;
+const int maxAnimations = 17;
+const int minAnimations = 2;
 void (*chosenAnimation)(void *);
-bool addAnimations = false;
 animation animationsArray[16][16];
 
 const int functionSwitchTimeMax = 100000;
 const int functionSwitchTimeMin = 30000;
 int functionSwitchTime = rand() % (functionSwitchTimeMax - functionSwitchTimeMin) + functionSwitchTimeMin;
-int lastSwitchTime = 0;
+unsigned long lastSwitchTime = 0;
 int btnPressed = 0;
+bool animationsOff = false;
+unsigned long pressedStart = 0;
+unsigned long turnOffThreshold = 700;
 int btnPressSleep = 0;
 int baseCycles = 0;
 int baseCyclesThreshold = 38;
@@ -156,6 +158,7 @@ OneWire oneWire(tempPin);
 DallasTemperature tempSensor(&oneWire);
 const int tempReadIntervalMs = 20000;
 int lastTempReadTime = 0;
+double tempReadValue = 0.0;
 
 /**TODO: remove commented code
 * add comments and documentation
@@ -176,16 +179,17 @@ void getPeak(void) {
 }
 
 void doFFT(void) {
-	FFT = arduinoFFT(real, imag, NSAMPLES, SAMPLE_RATE);
-	FFT.Windowing(FFT_WIN_TYP_HAMMING, FFT_FORWARD);
 	FFT.Compute(FFT_FORWARD);
 	FFT.ComplexToMagnitude();
-	int i = 2;
+	int i = 1;
 	double freq = (i * SAMPLE_RATE) / NSAMPLES;
+	int band;
+	double result;
+	int nbands;
 	for (int bIndex = 0; bIndex < NBANDS; bIndex++) {
-		const int band = BANDS[bIndex];
-		double result = 0;
-		int nbands = 0;
+		band = BANDS[bIndex];
+		result = 0;
+		nbands = 0;
 		while (freq < band) {
 			freq = (i * SAMPLE_RATE) / NSAMPLES;
 			result += real[i];
@@ -199,6 +203,8 @@ void doFFT(void) {
 		// Reduce vaule of OP base
 		if (bIndex == 0)
 			result *= 0.3;
+		else if (bIndex > NBANDS - 3)
+			result *= 1.56;
 
 		bandValues[bIndex] = result;
 		if (DEBUG) {
@@ -246,20 +252,20 @@ void getSamples(int amount) {
 	}
 }
 
-double getSampleSpeed() {
-	int samples = 10000;
-	double start = micros();
-	for (int i = 0; i < samples; i++) {
-		(analogRead(micPin) - IDLE_READING) * 1.0;
-	}
-	double time = micros() - start;
-	double speed = samples / time;
-	time = (double)samples / time;
-	if (DEBUG) {
-		Serial.printf("Time for one sample: %lfus, sample speed: %lf/s\n", time, speed * 1000 * 1000);
-	}
-	return speed;
-}
+// double getSampleSpeed() {
+// 	int samples = 10000;
+// 	double start = micros();
+// 	for (int i = 0; i < samples; i++) {
+// 		(analogRead(micPin) - IDLE_READING) * 1.0;
+// 	}
+// 	double time = micros() - start;
+// 	double speed = samples / time;
+// 	time = (double)samples / time;
+// 	if (DEBUG) {
+// 		Serial.printf("Time for one sample: %lfus, sample speed: %lf/s\n", time, speed * 1000 * 1000);
+// 	}
+// 	return speed;
+// }
 
 void showSpectrum(void *params) {
 	if (DEBUG) {
@@ -423,34 +429,31 @@ void pulseToBase(void *params) {
 				baseCycles += 4;
 		} else if (i < lastMidIndex) {
 			if (bandValues[i] > midThreshold) {
-				if (addAnimations)
-					addAnimation(STAR);
+				addAnimation(STAR);
 			}
 		} else {
 			if (bandValues[i] > highThreshold) {
-				if (addAnimations)
-					addAnimation(STRIPE);
+				addAnimation(STRIPE);
 			}
 		}
 	}
 	if (baseCycles >= baseCyclesThreshold * 0.9) {
 		baseCycles -= 20;
 		baseThreshold *= downFreqModifier;
-	} else if (cyclesWithoutBase >= CYCLES_WITHOUT_BASE_THRESHOLD && baseThreshold > BASE_THRESHOLD)
+	} else if (baseThreshold > BASE_THRESHOLD && cyclesWithoutBase >= CYCLES_WITHOUT_BASE_THRESHOLD)
 		baseThreshold *= upFreqModifier;
 	if (animations >= maxAnimations * 0.9) {
 		if (midThreshold > MID_THRESHOLD)
 			midThreshold *= downFreqModifier;
 		if (highThreshold > HIGH_THRESHOLD)
 			highThreshold *= downFreqModifier;
-	} else if (animations <= minAnimations * 0.9) {
+	} else if (midThreshold > MID_THRESHOLD && animations <= minAnimations * 0.9) {
 		midThreshold *= upFreqModifier;
 		highThreshold *= upFreqModifier;
 	}
 	showAnimations();
 	FastLED.show();
 	// strip.Show();
-	addAnimations = false;
 }
 
 void (*animationTypes[])(void *) = { showSpectrum, pulseToBase };
@@ -462,57 +465,62 @@ void (*getRandomAnimation())(void *) {
 
 void callMatrixFunction(void *params) {
 	unsigned long matrixStart;
-	float voltage;
 	for (;;) {
 		TIMERG1.wdt_wprotect = TIMG_WDT_WKEY_VALUE;
 		TIMERG1.wdt_feed = 1;
 		TIMERG1.wdt_wprotect = 0;
-		matrixStart = millis();
-		if (abs(millis() - lastSwitchTime) > functionSwitchTime) {
-			lastSwitchTime = millis();
-			chosenAnimation = getRandomAnimation();
-			animations = 0;
-			if (DEBUG) {
-				voltage = 0;
-				for (int i = 0; i < 64; i++) {
-					voltage += (HIGH_VOLTAGE * (float)analogRead(tempPin)) / 4096.0;
-				}
-				voltage /= 64;
-				Serial.printf("Temp sensor voltage: %f mV\n", voltage);
-				//TODO: temperature measurement + fan curve + fan output (waiting for parts to arrive) -> remove DEBUG
-			}
-		}
-		paletteStepCountdown--;
-		if (paletteStepCountdown == 0) {
-			paletteProgress = (paletteProgress + paletteStep) % 256;
-			paletteStepCountdown = PALETTE_STEP_COUNTDOWN;
-		}
-		//TODO: debug pulsetobase, remove!!!!
-		// chosenAnimation = pulseToBase;
-		chosenAnimation(params);
-		functionSwitchTime = rand() % (functionSwitchTimeMax - functionSwitchTimeMin) + functionSwitchTimeMin;
-		// rainbowCurrent.H = fmodf((rainbowCurrent.H + rainbowStep), 1.0);
-		vTaskDelay(1 / portTICK_PERIOD_MS);
-		while (abs(millis() - matrixStart) < 1000 / MATRIX_FPS) {
-			// check for switch button in the meantime
-			if (digitalRead(switchPin) == HIGH && (abs(millis() - btnPressed) > btnPressSleep)) {
+		if (!animationsOff) {
+			matrixStart = millis();
+			if (abs(millis() - lastSwitchTime) > functionSwitchTime) {
 				lastSwitchTime = millis();
-				btnPressed = millis();
 				chosenAnimation = getRandomAnimation();
-				while (abs(millis() - matrixStart) < 1000 / MATRIX_FPS)
-					;
-				break;
+				animations = 0;
 			}
-			if (abs(millis() - lastTempReadTime) >= tempReadIntervalMs) {
-				lastTempReadTime = millis();
-				tempSensor.requestTemperatures();
-				float tempC = tempSensor.getTempCByIndex(0);
-				int fanSpeed = tempC < 40 ? 98.30973 + (-0.1301144 - 98.30973) / (1 + pow(pow(tempC / 25.0224, 524.2068), 0.01626859)) : 100;
-				fanSpeed = fanSpeed > 80 ? fanSpeed : 0;
-				ledcWrite(fanChannel, (fanSpeed * 1023) / 100);
-				if (DEBUG)
-					Serial.printf("Temperature: %.1f°C -> fan at %d.\n", tempC, fanSpeed);
+			paletteStepCountdown--;
+			if (paletteStepCountdown == 0) {
+				paletteProgress = (paletteProgress + paletteStep) % 256;
+				paletteStepCountdown = PALETTE_STEP_COUNTDOWN;
 			}
+			//TODO: debug pulsetobase, remove!!!!
+			// chosenAnimation = pulseToBase;
+			chosenAnimation(params);
+			functionSwitchTime = rand() % (functionSwitchTimeMax - functionSwitchTimeMin) + functionSwitchTimeMin;
+			// rainbowCurrent.H = fmodf((rainbowCurrent.H + rainbowStep), 1.0);
+			vTaskDelay(1 / portTICK_PERIOD_MS);
+			while (abs(millis() - matrixStart) < 1000 / MATRIX_FPS) {
+				// check for switch button in the meantime
+				if (digitalRead(switchPin) == HIGH && (abs(millis() - btnPressed) > btnPressSleep)) {
+					// Serial.println("Changing animation.");
+					lastSwitchTime = millis();
+					btnPressed = millis();
+					chosenAnimation = getRandomAnimation();
+					while (abs(millis() - matrixStart) < 1000 / MATRIX_FPS)
+						;
+					break;
+				}
+				if (abs(millis() - lastTempReadTime) >= tempReadIntervalMs) {
+					if (tempReadValue == 0.0) {
+						lastTempReadTime = millis();
+						tempSensor.requestTemperatures();
+						tempReadValue = tempSensor.getTempCByIndex(0);
+						while (abs(millis() - matrixStart) < 1000 / MATRIX_FPS)
+							;
+						break;
+					} else {
+						int fanSpeed = tempReadValue < 40 ? 98.30973 + (-0.1301144 - 98.30973) / (1 + pow(pow(tempReadValue / 25.0224, 524.2068), 0.01626859)) : 100;
+						fanSpeed = fanSpeed > 80 ? fanSpeed : 0;
+						ledcWrite(fanChannel, (fanSpeed * 1023) / 100);
+						if (DEBUG)
+							Serial.printf("Temperature: %.1f°C -> fan at %d.\n", tempReadValue, fanSpeed);
+						tempReadValue = 0.0;
+						while (abs(millis() - matrixStart) < 1000 / MATRIX_FPS)
+							;
+						break;
+					}
+				}
+			}
+		} else {
+			vTaskDelay(1 / portTICK_PERIOD_MS);
 		}
 	}
 }
@@ -548,6 +556,8 @@ void setup() {
 	tempSensor.begin();
 	std::random_shuffle(animationTypes, std::end(animationTypes));
 	chosenAnimation = pulseToBase;
+	FFT = arduinoFFT(real, imag, NSAMPLES, SAMPLE_RATE);
+	FFT.Windowing(FFT_WIN_TYP_HANN, FFT_FORWARD);
 	xTaskCreatePinnedToCore(
 	    callMatrixFunction,
 	    "Matrix rendering",
@@ -562,7 +572,6 @@ void loop() {
 	getSamples(NSAMPLES);
 	std::fill(imag, std::end(imag), 0.0);
 	doFFT();
-	addAnimations = true;
 	// for (int i = 0; i < NSAMPLES / 2; i++) {
 	//     // Serial.printf("Peak: %lf\n", peak);
 	//     Serial.printf("%f Hz: %lf\n", freq, real[i]);
@@ -570,4 +579,15 @@ void loop() {
 	// }
 	if (DEBUG)
 		Serial.printf("---------\n");
+	if (digitalRead(switchPin) == HIGH) {
+		if (pressedStart == 0) {
+			pressedStart = millis();
+		} else if (abs(millis() - pressedStart) < turnOffThreshold) {
+			animationsOff = !animationsOff;
+			fill_solid(FastLED.leds(), MATRIX_SIZE, off);
+			FastLED.show();
+		} else {
+			pressedStart = millis();
+		}
+	}
 }
