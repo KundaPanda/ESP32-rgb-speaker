@@ -146,6 +146,7 @@ const int functionSwitchTimeMax = 100000;
 const int functionSwitchTimeMin = 30000;
 int functionSwitchTime = rand() % (functionSwitchTimeMax - functionSwitchTimeMin) + functionSwitchTimeMin;
 unsigned long lastSwitchTime = 0;
+bool canSwitch = false;
 int btnPressed = 0;
 bool animationsOff = false;
 unsigned long pressedStart = 0;
@@ -520,6 +521,8 @@ void callMatrixFunction(void *params) {
 				}
 			}
 		} else {
+			fill_solid(FastLED.leds(), MATRIX_SIZE, off);
+			FastLED.show();
 			vTaskDelay(1 / portTICK_PERIOD_MS);
 		}
 	}
@@ -582,12 +585,13 @@ void loop() {
 	if (digitalRead(switchPin) == HIGH) {
 		if (pressedStart == 0) {
 			pressedStart = millis();
-		} else if (abs(millis() - pressedStart) < turnOffThreshold) {
+		} else if (abs(millis() - pressedStart) < turnOffThreshold && canSwitch) {
 			animationsOff = !animationsOff;
-			fill_solid(FastLED.leds(), MATRIX_SIZE, off);
-			FastLED.show();
+			canSwitch = false;
 		} else {
 			pressedStart = millis();
 		}
+	} else {
+		canSwitch = true;
 	}
 }
